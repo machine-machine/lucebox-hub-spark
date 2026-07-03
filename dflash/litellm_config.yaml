@@ -1,0 +1,32 @@
+# LiteLLM proxy config — 'coding' routes to Ornith-1.0-35B (AEON Uncensored,
+# IQ4_XS GGUF, llama-server on :8181). The old Qwen3.6-27B DFlash server stays
+# reachable on :8180 under 'qwen3.6-coding'.
+#
+# Start Ornith first (builds llama-server, downloads model, serves on 8181):
+#   bash dflash/scripts/setup_ornith35b.sh
+# Then:
+#   litellm --config dflash/litellm_config.yaml --port 4000
+#
+# Clients point at http://localhost:4000/v1 with any API key.
+
+model_list:
+  - model_name: coding
+    litellm_params:
+      model: openai/luce-ornith
+      api_base: http://localhost:8181/v1
+      api_key: sk-local
+
+  - model_name: ornith-coding
+    litellm_params:
+      model: openai/luce-ornith
+      api_base: http://localhost:8181/v1
+      api_key: sk-local
+
+  - model_name: qwen3.6-coding
+    litellm_params:
+      model: openai/luce-dflash
+      api_base: http://localhost:8180/v1
+      api_key: sk-local
+
+general_settings:
+  master_key: sk-local
