@@ -134,11 +134,14 @@ done
 curl -sf "http://localhost:${ORNITH_PORT}/health" >/dev/null \
     || die "server did not become healthy within 4 min"
 
+# Ornith is a thinking model: tokens go to reasoning_content first, so the
+# budget must be large enough to reach the final answer.
 RESP=$(curl -sf "http://localhost:${ORNITH_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
-    -d '{"model":"luce-ornith","messages":[{"role":"user","content":"Say OK."}],"max_tokens":8}') \
+    -d '{"model":"luce-ornith","messages":[{"role":"user","content":"Say OK."}],"max_tokens":512}') \
     || die "smoke-test completion failed"
-ok "Smoke test reply: $(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["choices"][0]["message"]["content"])' "$RESP")"
+REPLY=$(python3 -c 'import json,sys; m=json.loads(sys.argv[1])["choices"][0]["message"]; print(m.get("content") or "(empty — raise max_tokens; reasoning used the budget)")' "$RESP")
+ok "Smoke test reply: $REPLY"
 
 ok "Ornith-1.0-35B serving on http://localhost:${ORNITH_PORT}/v1 (alias: luce-ornith)"
 info "Route through LiteLLM: litellm --config $DFLASH_DIR/litellm_config.yaml --port 4000"
