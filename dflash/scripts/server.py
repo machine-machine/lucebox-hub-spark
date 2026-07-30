@@ -162,6 +162,35 @@ def build_app(target: Path, draft: Path, bin_path: Path, budget: int, max_ctx: i
                                        stdin=subprocess.PIPE)
     os.close(w_pipe)
 
+    def _daemon_send(cmd_line: str) -> None:
+        """Write a command to the daemon stdin. Exit the server if the pipe is broken
+        (daemon crashed) so systemd can restart the whole service cleanly."""
+        rc = daemon_proc.poll()
+        if rc is not None:
+            import logging
+            logging.getLogger("uvicorn.error").critical(
+                "[dflash] daemon already dead (exit=%s) — restarting service", rc)
+            os._exit(1)
+        try:
+            daemon_proc.stdin.write(cmd_line.encode("utf-8"))
+            daemon_proc.stdin.flush()
+        except BrokenPipeError:
+            rc = daemon_proc.poll()
+            import logging
+            logging.getLogger("uvicorn.error").critical(
+                "[dflash] daemon pipe broken (exit=%s) — restarting service", rc)
+            os._exit(1)
+
+    def _check_daemon_alive() -> None:
+        """Call after a token stream returns to detect daemon exit. If the daemon
+        exited (e.g. on 'empty prompt'), kill the server so systemd restarts it."""
+        rc = daemon_proc.poll()
+        if rc is not None:
+            import logging
+            logging.getLogger("uvicorn.error").critical(
+                "[dflash] daemon exited (exit=%s) after generation — restarting service", rc)
+            os._exit(1)
+
     @app.get("/v1/models")
     def list_models():
         return {
@@ -251,6 +280,14 @@ def build_app(target: Path, draft: Path, bin_path: Path, budget: int, max_ctx: i
             if generated >= n_gen:
                 hit_stop = True
 
+    def _busy_response(code: int = 503) -> JSONResponse:
+        return JSONResponse(
+            {"error": {"message": "server busy — generation in progress",
+                       "type": "server_busy", "code": code}},
+            status_code=code,
+            headers={"Retry-After": "5"},
+        )
+
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatRequest):
         prompt_bin, prompt_ids, raw_msgs = _tokenize_prompt(req)
@@ -262,6 +299,13 @@ def build_app(target: Path, draft: Path, bin_path: Path, budget: int, max_ctx: i
             return min(req.max_tokens, max_ctx - prompt_len - 20)
 
         if req.stream:
+            # Reject immediately if busy — the SSE response header is sent
+            # before we'd discover the conflict, so we must check here.
+            if daemon_lock.locked():
+                try: prompt_bin.unlink()
+                except Exception: pass
+                return _busy_response()
+
             async def sse() -> AsyncIterator[str]:
                 async with daemon_lock:
                     cur_bin, cur_ids = await asyncio.to_thread(
@@ -279,8 +323,7 @@ def build_app(target: Path, draft: Path, bin_path: Path, budget: int, max_ctx: i
                         yield "data: [DONE]\n\n"
                         return
                     cmd_line = f"{cur_bin} {gen_len}\n"
-                    daemon_proc.stdin.write(cmd_line.encode("utf-8"))
-                    daemon_proc.stdin.flush()
+                    _daemon_send(cmd_line)
                     head = {
                         "id": completion_id, "object": "chat.completion.chunk",
                         "created": created, "model": MODEL_NAME,
@@ -305,6 +348,7 @@ def build_app(target: Path, draft: Path, bin_path: Path, budget: int, max_ctx: i
                     finally:
                         try: cur_bin.unlink()
                         except Exception: pass
+                    _check_daemon_alive()
                     tail = {
                         "id": completion_id, "object": "chat.completion.chunk",
                         "created": created, "model": MODEL_NAME,
@@ -316,22 +360,37 @@ def build_app(target: Path, draft: Path, bin_path: Path, budget: int, max_ctx: i
 
             return StreamingResponse(sse(), media_type="text/event-stream")
 
-        # Non-streaming: collect all tokens, return one response
-        async with daemon_lock:
-            cur_bin, cur_ids = await asyncio.to_thread(
-                _maybe_compress, raw_msgs, prompt_bin, prompt_ids)
-            prompt_len = len(cur_ids)
-            gen_len = _gen_len_for(prompt_len)
-            if gen_len <= 0:
-                try: cur_bin.unlink()
-                except Exception: pass
-                return JSONResponse(
-                    {"detail": f"Prompt length ({prompt_len}) exceeds max_ctx ({max_ctx})"},
-                    status_code=400)
-            cmd_line = f"{cur_bin} {gen_len}\n"
-            daemon_proc.stdin.write(cmd_line.encode("utf-8"))
-            daemon_proc.stdin.flush()
-            tokens = list(_token_stream(r_pipe, gen_len))
+        # Non-streaming: reject immediately if busy.
+        if daemon_lock.locked():
+            try: prompt_bin.unlink()
+            except Exception: pass
+            return _busy_response()
+
+        try:
+            async with daemon_lock:
+                cur_bin, cur_ids = await asyncio.to_thread(
+                    _maybe_compress, raw_msgs, prompt_bin, prompt_ids)
+                prompt_len = len(cur_ids)
+                gen_len = _gen_len_for(prompt_len)
+                if gen_len <= 0:
+                    try: cur_bin.unlink()
+                    except Exception: pass
+                    return JSONResponse(
+                        {"detail": f"Prompt length ({prompt_len}) exceeds max_ctx ({max_ctx})"},
+                        status_code=400)
+                cmd_line = f"{cur_bin} {gen_len}\n"
+                _daemon_send(cmd_line)
+                # Run in a thread so the event loop stays responsive during generation.
+                tokens = await asyncio.to_thread(list, _token_stream(r_pipe, gen_len))
+                _check_daemon_alive()
+        except Exception as exc:
+            import logging
+            logging.getLogger("uvicorn.error").error("[dflash] request error: %s", exc)
+            try: prompt_bin.unlink()
+            except Exception: pass
+            return JSONResponse(
+                {"error": {"message": str(exc), "type": "internal_error", "code": 500}},
+                status_code=500)
 
         try: cur_bin.unlink()
         except Exception: pass
@@ -405,6 +464,11 @@ def build_app(target: Path, draft: Path, bin_path: Path, budget: int, max_ctx: i
         msg_id = "msg_" + uuid.uuid4().hex[:24]
 
         if req.stream:
+            if daemon_lock.locked():
+                try: prompt_bin.unlink()
+                except Exception: pass
+                return _busy_response()
+
             async def sse() -> AsyncIterator[str]:
                 # Hold the lock across the ENTIRE read cycle so concurrent
                 # requests don't interleave tokens through the shared pipe.
@@ -439,8 +503,7 @@ def build_app(target: Path, draft: Path, bin_path: Path, budget: int, max_ctx: i
                     yield f"event: content_block_start\ndata: {json.dumps(cb_start)}\n\n"
 
                     cmd_line = f"{cur_bin} {gen_len}\n"
-                    daemon_proc.stdin.write(cmd_line.encode("utf-8"))
-                    daemon_proc.stdin.flush()
+                    _daemon_send(cmd_line)
 
                     out_tokens = 0
                     try:
@@ -455,6 +518,7 @@ def build_app(target: Path, draft: Path, bin_path: Path, budget: int, max_ctx: i
                     finally:
                         try: cur_bin.unlink()
                         except Exception: pass
+                    _check_daemon_alive()
 
                     yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
 
@@ -469,23 +533,38 @@ def build_app(target: Path, draft: Path, bin_path: Path, budget: int, max_ctx: i
             return StreamingResponse(sse(), media_type="text/event-stream")
 
         # Non-streaming
-        async with daemon_lock:
-            cur_bin, cur_ids = await asyncio.to_thread(
-                _maybe_compress, raw_msgs, prompt_bin, prompt_ids)
-            prompt_len = len(cur_ids)
-            gen_len = min(req.max_tokens, max_ctx - prompt_len - 20)
-            if gen_len <= 0:
-                try: cur_bin.unlink()
-                except Exception: pass
-                return JSONResponse(
-                    {"type": "error",
-                     "error": {"type": "invalid_request_error",
-                               "message": f"Prompt length ({prompt_len}) exceeds max_ctx ({max_ctx})"}},
-                    status_code=400)
-            cmd_line = f"{cur_bin} {gen_len}\n"
-            daemon_proc.stdin.write(cmd_line.encode("utf-8"))
-            daemon_proc.stdin.flush()
-            tokens = [t async for t in _astream_tokens(r_pipe, gen_len)]
+        if daemon_lock.locked():
+            try: prompt_bin.unlink()
+            except Exception: pass
+            return _busy_response()
+
+        try:
+            async with daemon_lock:
+                cur_bin, cur_ids = await asyncio.to_thread(
+                    _maybe_compress, raw_msgs, prompt_bin, prompt_ids)
+                prompt_len = len(cur_ids)
+                gen_len = min(req.max_tokens, max_ctx - prompt_len - 20)
+                if gen_len <= 0:
+                    try: cur_bin.unlink()
+                    except Exception: pass
+                    return JSONResponse(
+                        {"type": "error",
+                         "error": {"type": "invalid_request_error",
+                                   "message": f"Prompt length ({prompt_len}) exceeds max_ctx ({max_ctx})"}},
+                        status_code=400)
+                cmd_line = f"{cur_bin} {gen_len}\n"
+                _daemon_send(cmd_line)
+                tokens = [t async for t in _astream_tokens(r_pipe, gen_len)]
+                _check_daemon_alive()
+        except Exception as exc:
+            import logging
+            logging.getLogger("uvicorn.error").error("[dflash] request error: %s", exc)
+            try: prompt_bin.unlink()
+            except Exception: pass
+            return JSONResponse(
+                {"type": "error",
+                 "error": {"type": "internal_error", "message": str(exc)}},
+                status_code=500)
 
         try: cur_bin.unlink()
         except Exception: pass

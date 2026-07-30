@@ -938,13 +938,13 @@ int main(int argc, char ** argv) {
 
     const int max_ctx = g_max_ctx_override > 0 ? g_max_ctx_override : 4096;
     // Size the ssm_intermediate / conv_input_cache buffers to cover whichever
-    // verify mode we'll use. DDTree needs room for 1 + ddtree_budget tree nodes.
-    // Profile mode intentionally keeps the intermediate cache tiny (no capture)
-    // so we can go up to n_tokens=128 without OOM.
+    // verify mode we'll use. DDTree needs room for exactly 1 + ddtree_budget
+    // tree nodes; conv_input_cache is only used by the tree path so there is
+    // no need to keep it at least DFLASH27B_DRAFT_BLOCK_SIZE.
     const int max_verify_tokens = profile_scaling
         ? DFLASH27B_DRAFT_BLOCK_SIZE
         : (ddtree_mode
-            ? std::max<int>(DFLASH27B_DRAFT_BLOCK_SIZE, ddtree_budget + 1)
+            ? ddtree_budget + 1
             : DFLASH27B_DRAFT_BLOCK_SIZE);
     TargetCache cache;
     if (!create_target_cache(w, max_ctx, max_verify_tokens, backend, cache,
@@ -1229,6 +1229,7 @@ int main(int argc, char ** argv) {
 
     while (true) {
         std::string prompt_file_str;
+        std::vector<int32_t> prompt;
         if (daemon_mode) {
             std::string line;
             if (!std::getline(std::cin, line)) break;
@@ -1380,6 +1381,11 @@ int main(int argc, char ** argv) {
             prompt_file_str = ppath;
             prompt_path = prompt_file_str.c_str();
 
+            // Read prompt BEFORE freeing the step graph — ggml_free(sg.ctx)
+            // can corrupt adjacent heap allocations and invalidate
+            // prompt_file_str's internal buffer, causing an empty read.
+            prompt = read_int32_file(prompt_path);
+
             // Reset cache state between requests. On the first request the
             // cache was promoted from prefill-only to full (with rollback
             // tensors) by migrate_prefill_cache. On subsequent requests we
@@ -1391,10 +1397,11 @@ int main(int argc, char ** argv) {
             daemon_first_iter = false;
         }
 
-        auto prompt = read_int32_file(prompt_path);
+        if (prompt.empty()) prompt = read_int32_file(prompt_path);
         if (prompt.empty()) {
-            std::fprintf(stderr, "empty prompt\n");
-            if (daemon_mode) { stream_emit(-1); continue; } else return 1;
+            std::fprintf(stderr, "empty prompt — exiting daemon so server can restart\n");
+            stream_emit(-1);
+            return 1;
         }
         std::printf("[prompt] %zu tokens\n", prompt.size());
 

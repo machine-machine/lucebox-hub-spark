@@ -135,6 +135,7 @@ target_include_directories(dflash27b
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
 if(DFLASH27B_ENABLE_BSA)
     target_include_directories(dflash27b PRIVATE
