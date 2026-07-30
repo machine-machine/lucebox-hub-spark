@@ -12,7 +12,17 @@ set -euo pipefail
 ENDPOINT="http://localhost:8181/v1/chat/completions"
 PAYLOAD='{"model":"luce-ornith","messages":[{"role":"user","content":"ping"}],"max_tokens":3}'
 LOG_TAG="ornith-healthcheck"
-GRACE_SECONDS=180
+GRACE_SECONDS=420
+
+# Only police a service that claims to be running. If it is activating,
+# deactivating, or restarting, systemd is already handling it — restarting
+# here would SIGKILL a model mid-load and create a permanent restart loop.
+state=$(systemctl --user is-active ornith 2>/dev/null || true)
+if [[ "$state" != "active" ]]; then
+    systemd-cat -t "$LOG_TAG" -p debug \
+        echo "ornith state=$state — leaving it to systemd"
+    exit 0
+fi
 
 started_usec=$(systemctl --user show ornith --property=ActiveEnterTimestampMonotonic --value)
 if [[ -n "$started_usec" && "$started_usec" != "0" ]]; then
