@@ -14,7 +14,7 @@ Thanks for considering a contribution. Lucebox is a hub of self-contained optimi
 
 - Closed-source dependencies. Everything here has to be reproducible from public sources.
 
-## Luce DFash Setup
+## Luce DFlash Setup
 
 ### dflash
 
@@ -23,7 +23,7 @@ Thanks for considering a contribution. Lucebox is a hub of self-contained optimi
 On Ubuntu 22.04 or 24.04, one script installs all system dependencies — `build-essential`, `cmake`, `git`, `git-lfs`, and the CUDA Toolkit from NVIDIA's repo:
 
 ```bash
-sudo dflash/scripts/setup_system.sh
+sudo server/scripts/setup_system.sh
 ```
 
 The script is idempotent and configures `nvcc` on PATH for both bash and zsh. For other distros see the [CUDA installation guide](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/).
@@ -36,16 +36,26 @@ The script is idempotent and configures `nvcc` on PATH for both bash and zsh. Fo
 | git-lfs | any |
 | CUDA Toolkit | 12.0+ |
 | huggingface-cli | any |
+| uv | 0.11+ (Python deps) |
 
 After setup:
 
 ```bash
 git submodule update --init --recursive
-cmake -B dflash/build -S dflash -DCMAKE_BUILD_TYPE=Release
-cmake --build dflash/build --target test_dflash -j
+
+# Python deps (workspace at the repo root; one .venv shared by dflash, pflash,
+# and optionally megakernel). `uv` is the canonical installer; the legacy
+# per-subproject `python -m venv .venv && pip install …` flow still works.
+uv sync                       # dflash + pflash deps
+uv sync --extra megakernel    # also compile the megakernel CUDA extension
+bash scripts/check_uv_workspace.sh  # lockfile + frozen-sync import smoke
+
+# C++/CUDA decoder
+cmake -B server/build -S dflash -DCMAKE_BUILD_TYPE=Release
+cmake --build server/build --target test_dflash -j
 ```
 
-> If cmake was previously run without CUDA, wipe the build directory first (`rm -rf dflash/build`) to avoid a stale compiler cache.
+> If cmake was previously run without CUDA, wipe the build directory first (`rm -rf server/build`) to avoid a stale compiler cache.
 
 ---
 
@@ -82,4 +92,4 @@ If you want to contribute benchmarks but don't have the hardware:
 
 ## Licensing
 
-By contributing you agree your work is MIT-licensed, same as the rest of the repo.
+By contributing you agree your work is licensed under the Apache License, Version 2.0, same as the rest of the repo (see `LICENSE`). Historical contributions before the relicense remain available under their original MIT terms in the git history.

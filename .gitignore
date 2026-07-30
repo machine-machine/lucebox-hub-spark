@@ -37,6 +37,7 @@ MANIFEST
 # virtualenvs
 venv/
 .venv/
+.conda/
 env/
 .env
 
@@ -56,6 +57,7 @@ env/
 *.qdrep
 *.sqlite
 bench-out/
+dflash/bench/results/
 profile-out/
 
 # Model weights and caches (pull fresh from HF)
@@ -64,8 +66,30 @@ checkpoints/
 *.safetensors
 *.bin
 .cache/
+fix-plan.md
 
 # Secrets
 .env.local
 *.pem
 *.key
+
+# Sisyphus working dossier (preserve outside repo)
+.sisyphus/
+
+# Harness test artifacts
+.harness-work/
+health
+
+# lucebox host-side generated config + benchmark output
+.lucebox/
+models/.lucebox/
+
+# Claude Code session state (worktrees, agent scratchpads)
+.claude/
+
+# Local tuning snapshots (not committed)
+dflash/docs/tuning-snapshots/
+
+# Workdir editor backup suffixes
+*.git-head
+*.pre-pflash-rename
