@@ -20,12 +20,13 @@ declare -A TIMER=(  [ornith]=ornith-healthcheck.timer [laguna]="" [qwen]=dflash-
 declare -A MODELS=( [ornith]="coding | ornith-coding" [laguna]="laguna-coding" [qwen]="qwen3.6-coding" )
 
 status() {
+    local b st hl
     printf '%-8s %-10s %-6s %s\n' BACKEND UNIT PORT HEALTH
-    for m in ornith laguna qwen; do
-        st=$(systemctl --user is-active "${UNIT[$m]}" 2>/dev/null || true)
+    for b in ornith laguna qwen; do
+        st=$(systemctl --user is-active "${UNIT[$b]}" 2>/dev/null || true)
         hl=down
-        curl -sf -m 2 "http://localhost:${PORT[$m]}${HEALTH[$m]}" >/dev/null 2>&1 && hl=healthy
-        printf '%-8s %-10s %-6s %s\n' "$m" "$st" "${PORT[$m]}" "$hl"
+        curl -sf -m 2 "http://localhost:${PORT[$b]}${HEALTH[$b]}" >/dev/null 2>&1 && hl=healthy
+        printf '%-8s %-10s %-6s %s\n' "$b" "$st" "${PORT[$b]}" "$hl"
     done
     printf 'litellm  %-10s 4000\n' "$(systemctl --user is-active litellm 2>/dev/null || true)"
 }
